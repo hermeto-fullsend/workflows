@@ -34,3 +34,42 @@ jobs:
           if gh issue view "${MIRROR_ISSUE_NUMBER}" --json labels --jq '.labels[].name' -R "${REPO}" | grep -q '^mirror$'; then
             echo "is_mirror=true" >> "${GITHUB_OUTPUT}"
           fi
+
+  validate:
+    needs: check
+    if: needs.check.outputs.is_mirror == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_issue_number: ${{ steps.parse_issue.outputs.upstream_issue_number }}
+      fullsend_stage: ${{ steps.parse_issue.outputs.fullsend_stage }}
+    steps:
+      - name: Fetch mirror issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+        run: |
+          gh issue view "${MIRROR_ISSUE_NUMBER}" --json body -R "${REPO}" > mirror_issue.json
+
+      - name: Parse mirror issue
+        id: parse_issue
+        shell: python3 -u {0}
+        run: |
+          import json, os, re, sys
+
+          with open("mirror_issue.json") as f:
+              issue = json.load(f)
+
+          body = issue["body"] or ""
+
+          upstream = re.findall(r'### Upstream issue number\n\n(\d+)', body)
+          stage = re.findall(r'### Starting stage\n\n(\w+)', body)
+
+          if not upstream:
+              sys.exit("could not parse upstream issue number")
+          if not stage or stage[0] not in ("triage", "code"):
+              sys.exit(f"invalid starting stage: {stage[0] if stage else '(not found)'}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"upstream_issue_number={upstream[0]}\n")
+              f.write(f"fullsend_stage={stage[0]}\n")
