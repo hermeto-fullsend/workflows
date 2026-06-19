@@ -1,0 +1,36 @@
+name: Mirror issue
+on:
+  workflow_call:
+    inputs:
+      upstream_repo:
+        required: true
+        type: string
+      mirror_issue_number:
+        required: true
+        type: number
+    secrets:
+      variable_token:
+        required: true
+
+permissions:
+  issues: write
+
+# Serialize runs to prevent race conditions on the MIRRORED_ISSUES variable
+concurrency: mirror-issue
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      is_mirror: ${{ steps.check.outputs.is_mirror }}
+    steps:
+      - name: Check mirror label
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+        run: |
+          if gh issue view "${MIRROR_ISSUE_NUMBER}" --json labels --jq '.labels[].name' -R "${REPO}" | grep -q '^mirror$'; then
+            echo "is_mirror=true" >> "${GITHUB_OUTPUT}"
+          fi
