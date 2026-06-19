@@ -8,9 +8,6 @@ on:
       mirror_issue_number:
         required: true
         type: number
-    secrets:
-      variable_token:
-        required: true
 
 permissions:
   issues: write
@@ -73,3 +70,42 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"upstream_issue_number={upstream[0]}\n")
               f.write(f"fullsend_stage={stage[0]}\n")
+
+  mirror:
+    needs: [check, validate]
+    if: needs.check.outputs.is_mirror == 'true' && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch upstream issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          UPSTREAM_ISSUE_NUMBER: ${{ needs.validate.outputs.upstream_issue_number }}
+        run: |
+          gh issue view "${UPSTREAM_ISSUE_NUMBER}" --json title,body -R "${UPSTREAM_REPO}" > upstream_issue.json
+
+      - name: Edit mirror issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          UPSTREAM_ISSUE_NUMBER: ${{ needs.validate.outputs.upstream_issue_number }}
+        run: |
+          new_title=$(jq -r '"[Fullsend#\(env.UPSTREAM_ISSUE_NUMBER)]: \(.title)"' upstream_issue.json)
+
+          # Using redirect.github.com avoids a reference to the mirror issue in the upstream issue
+          upstream_url="https://redirect.github.com/${UPSTREAM_REPO}/issues/${UPSTREAM_ISSUE_NUMBER}"
+
+          {
+            echo "> Mirrored from [${UPSTREAM_REPO}#${UPSTREAM_ISSUE_NUMBER}](${upstream_url})"
+            echo ""
+            echo "## Original description"
+            echo ""
+            jq -r '.body' upstream_issue.json
+          } > new_body.md
+
+          gh issue edit "${MIRROR_ISSUE_NUMBER}" \
+            --title "${new_title}" \
+            --body-file new_body.md \
+            -R "${REPO}"
