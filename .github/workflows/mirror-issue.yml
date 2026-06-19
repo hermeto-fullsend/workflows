@@ -84,11 +84,31 @@ jobs:
             exit 1
           fi
 
+      - name: Check for a duplicate issue
+        id: check_duplicate
+        env:
+          MIRRORED_ISSUES: ${{ vars.MIRRORED_ISSUES }}
+          UPSTREAM_ISSUE_NUMBER: ${{ steps.parse_issue.outputs.upstream_issue_number }}
+        run: |
+          # MIRRORED_ISSUES is a GitHub variable: "upstreamA:mirrorA,upstreamB:mirrorB,..." (issue number pairs)
+          existing=$(echo "${MIRRORED_ISSUES}" | grep -oP "(?<=^|,)${UPSTREAM_ISSUE_NUMBER}:\K[^,]+" || true)
+          if [ -n "${existing}" ]; then
+            echo "error=Upstream issue ${UPSTREAM_ISSUE_NUMBER} is already mirrored in #${existing}" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+
   mirror:
     needs: [check, validate]
     if: needs.check.outputs.is_mirror == 'true' && needs.validate.result == 'success'
     runs-on: ubuntu-latest
     steps:
+      - name: Generate repo token
+        id: repo-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GITHUB_APP_ID }}
+          private-key: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+
       - name: Fetch upstream issue
         env:
           GH_TOKEN: ${{ github.token }}
@@ -136,3 +156,17 @@ jobs:
           FULLSEND_STAGE: ${{ needs.validate.outputs.fullsend_stage }}
         run: |
           gh issue edit "${MIRROR_ISSUE_NUMBER}" --add-label "ready-to-${FULLSEND_STAGE}" -R "${REPO}"
+
+      - name: Update mirrored issues
+        env:
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          MIRRORED_ISSUES: ${{ vars.MIRRORED_ISSUES }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+          UPSTREAM_ISSUE_NUMBER: ${{ needs.validate.outputs.upstream_issue_number }}
+        run: |
+          # Append to MIRRORED_ISSUES variable: "upstreamA:mirrorA,upstreamB:mirrorB,..." (issue number pairs)
+          if [ -n "${MIRRORED_ISSUES}" ]; then
+            MIRRORED_ISSUES="${MIRRORED_ISSUES},"
+          fi
+          gh variable set MIRRORED_ISSUES --body "${MIRRORED_ISSUES}${UPSTREAM_ISSUE_NUMBER}:${MIRROR_ISSUE_NUMBER}" -R "${REPO}"
