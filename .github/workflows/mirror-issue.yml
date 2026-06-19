@@ -84,11 +84,31 @@ jobs:
             exit 1
           fi
 
+      - name: Check for a duplicate issue
+        id: check_duplicate
+        env:
+          MIRRORED_ISSUES: ${{ vars.MIRRORED_ISSUES }}
+          UPSTREAM_ISSUE_NUMBER: ${{ steps.parse_issue.outputs.upstream_issue_number }}
+        run: |
+          # MIRRORED_ISSUES is a JSON object: {"<upstream_number>":<mirror_number>,...}
+          existing=$(echo "${MIRRORED_ISSUES:-{\}}" | jq -r --arg key "${UPSTREAM_ISSUE_NUMBER}" '.[$key] // empty')
+          if [ -n "${existing}" ]; then
+            echo "error=Upstream issue ${UPSTREAM_ISSUE_NUMBER} is already mirrored in #${existing}" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+
   mirror:
     needs: [check, validate]
     if: needs.check.outputs.is_mirror == 'true' && needs.validate.result == 'success'
     runs-on: ubuntu-latest
     steps:
+      - name: Generate repo token
+        id: repo-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
       - name: Fetch upstream issue
         env:
           GH_TOKEN: ${{ github.token }}
@@ -141,3 +161,15 @@ jobs:
             label="ready-to-code"
           fi
           gh issue edit "${MIRROR_ISSUE_NUMBER}" --add-label "${label}" -R "${REPO}"
+
+      - name: Update mirrored issues
+        env:
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          MIRRORED_ISSUES: ${{ vars.MIRRORED_ISSUES }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+          UPSTREAM_ISSUE_NUMBER: ${{ needs.validate.outputs.upstream_issue_number }}
+        run: |
+          # Update MIRRORED_ISSUES JSON object: {"<upstream_number>":<mirror_number>,...}
+          new_value=$(echo "${MIRRORED_ISSUES:-{\}}" | jq -c --arg key "${UPSTREAM_ISSUE_NUMBER}" --argjson val "${MIRROR_ISSUE_NUMBER}" '. + {($key):$val}')
+          gh variable set MIRRORED_ISSUES --body "${new_value}" -R "${REPO}"
