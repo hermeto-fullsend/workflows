@@ -114,3 +114,12 @@ jobs:
             --title "${new_title}" \
             --body-file new_body.md \
             -R "${REPO}"
+
+      - name: Apply stage label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+          FULLSEND_STAGE: ${{ needs.validate.outputs.fullsend_stage }}
+        run: |
+          gh issue edit "${MIRROR_ISSUE_NUMBER}" --add-label "ready-to-${FULLSEND_STAGE}" -R "${REPO}"
