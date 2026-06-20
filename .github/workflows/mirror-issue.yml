@@ -62,14 +62,18 @@ jobs:
           upstream = re.findall(r'### Upstream issue number\n\n(\d+)', body)
           stage = re.findall(r'### Starting stage\n\n(\w+)', body)
 
-          if not upstream:
-              sys.exit("could not parse upstream issue number")
-          if not stage or stage[0] not in ("triage", "code"):
-              sys.exit(f"invalid starting stage: {stage[0] if stage else '(not found)'}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              if not upstream:
+                  out.write("error=could not parse upstream issue number\n")
+                  out.flush()
+                  sys.exit(1)
+              if not stage or stage[0] not in ("triage", "code"):
+                  out.write(f"error=invalid starting stage: {stage[0] if stage else '(not found)'}\n")
+                  out.flush()
+                  sys.exit(1)
 
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"upstream_issue_number={upstream[0]}\n")
-              f.write(f"fullsend_stage={stage[0]}\n")
+              out.write(f"upstream_issue_number={upstream[0]}\n")
+              out.write(f"fullsend_stage={stage[0]}\n")
 
       - name: Check upstream issue is open
         id: check_upstream
@@ -96,6 +100,21 @@ jobs:
             echo "error=Upstream issue ${UPSTREAM_ISSUE_NUMBER} is already mirrored in #${existing}" >> "${GITHUB_OUTPUT}"
             exit 1
           fi
+
+      - name: Handle validation failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+          PARSE_ERROR: ${{ steps.parse_issue.outputs.error }}
+          UPSTREAM_ERROR: ${{ steps.check_upstream.outputs.error }}
+          DUPLICATE_ERROR: ${{ steps.check_duplicate.outputs.error }}
+        run: |
+          error="${PARSE_ERROR}${UPSTREAM_ERROR}${DUPLICATE_ERROR}"
+          error="${error:-Check the [workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) for details.}"
+          gh issue comment "${MIRROR_ISSUE_NUMBER}" --body "Mirror issue workflow failed: ${error}" -R "${REPO}"
+          gh issue close "${MIRROR_ISSUE_NUMBER}" -R "${REPO}"
 
   mirror:
     needs: [check, validate]
@@ -170,3 +189,12 @@ jobs:
             MIRRORED_ISSUES="${MIRRORED_ISSUES},"
           fi
           gh variable set MIRRORED_ISSUES --body "${MIRRORED_ISSUES}${UPSTREAM_ISSUE_NUMBER}:${MIRROR_ISSUE_NUMBER}" -R "${REPO}"
+
+      - name: Handle mirror failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+        run: |
+          gh issue comment "${MIRROR_ISSUE_NUMBER}" --body "Mirror issue workflow failed during mirroring. Check the [workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) for details." -R "${REPO}"
