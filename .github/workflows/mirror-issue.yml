@@ -71,6 +71,19 @@ jobs:
               f.write(f"upstream_issue_number={upstream[0]}\n")
               f.write(f"fullsend_stage={stage[0]}\n")
 
+      - name: Check upstream issue is open
+        id: check_upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          UPSTREAM_ISSUE_NUMBER: ${{ steps.parse_issue.outputs.upstream_issue_number }}
+        run: |
+          state=$(gh issue view "${UPSTREAM_ISSUE_NUMBER}" --json state --jq '.state' -R "${UPSTREAM_REPO}")
+          if [ "${state}" != "OPEN" ]; then
+            echo "error=Upstream issue ${UPSTREAM_REPO}#${UPSTREAM_ISSUE_NUMBER} is ${state}" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+
   mirror:
     needs: [check, validate]
     if: needs.check.outputs.is_mirror == 'true' && needs.validate.result == 'success'
