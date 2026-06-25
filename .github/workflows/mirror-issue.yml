@@ -118,6 +118,11 @@ jobs:
             jq -r '.body // ""' upstream_issue.json
           } > new_body.md
 
+          # Sanitize the issue body to avoid GitHub references to upstream
+          sed -i -e "s@https://github.com/${UPSTREAM_REPO}/@https://redirect.github.com/${UPSTREAM_REPO}/@g" new_body.md
+          # Turn `#123` into `[org/repo#123](https://redirect.github.com/org/repo/issues/123)`
+          sed -i -E "s@(^|[^[:alnum:]\[])#([0-9]+)\b@\1[${UPSTREAM_REPO}#\2](https://redirect.github.com/${UPSTREAM_REPO}/issues/\2)@g" new_body.md
+
           gh issue edit "${MIRROR_ISSUE_NUMBER}" \
             --title "${new_title}" \
             --body-file new_body.md \
