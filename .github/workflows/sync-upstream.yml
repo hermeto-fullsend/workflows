@@ -1,0 +1,86 @@
+---
+name: Sync upstream
+on:
+  workflow_call:
+    inputs:
+      upstream_repo:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.UPSTREAM_SYNC_APP_ID }}
+          private-key: ${{ secrets.UPSTREAM_SYNC_PRIVATE_KEY }}
+
+      - name: Check if sync PR is open
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing=$(gh pr list --head sync-upstream-conflict --state open --json number | jq length)
+          if [[ $existing -gt 0 ]]; then
+            echo "Conflict PR already exists the conflict should be resolved there"
+            exit 1
+          fi
+
+      - name: Check out fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Fetch upstream
+        env:
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream
+
+      - name: Attempt rebase and push
+        id: rebase_attempt
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Assuming that the default branch is the one checked out by the checkout step
+          # It's reasonable to assume that the fork and upstream repository will share the same default branch
+          default_branch="$(git branch --show-current)"
+
+          if git rebase "upstream/${default_branch}"; then
+            git push origin "$default_branch" --force
+          else
+            git rebase --abort
+            exit 1
+          fi
+        continue-on-error: true
+
+      - name: Create a PR for conflict resolution
+        if: steps.rebase_attempt.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          default_branch="$(git branch --show-current)"
+          sync_branch="sync-upstream-conflict"
+
+          git switch -c "$sync_branch"
+
+          git merge "upstream/${default_branch}" || true
+          git add -A
+          git commit -m "Upstream sync attempt with conflicts"
+          git push origin "$sync_branch" --force
+
+          gh pr create \
+            --title "Resolve upstream sync conflicts" \
+            --body "Automatic sync with upstream encountered conflicts that require manual resolution. Please resolve" \
+            --head "$sync_branch" \
+            --base "$default_branch"
