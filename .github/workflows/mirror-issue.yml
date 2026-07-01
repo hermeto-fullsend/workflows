@@ -1,0 +1,200 @@
+name: Mirror issue
+on:
+  workflow_call:
+    inputs:
+      upstream_repo:
+        required: true
+        type: string
+      mirror_issue_number:
+        required: true
+        type: number
+
+permissions:
+  issues: write
+
+# Serialize runs to prevent race conditions on the MIRRORED_ISSUES variable
+concurrency: mirror-issue
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      is_mirror: ${{ steps.check.outputs.is_mirror }}
+    steps:
+      - name: Check mirror label
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+        run: |
+          if gh issue view "${MIRROR_ISSUE_NUMBER}" --json labels --jq '.labels[].name' -R "${REPO}" | grep -q '^mirror$'; then
+            echo "is_mirror=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+  validate:
+    needs: check
+    if: needs.check.outputs.is_mirror == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_issue_number: ${{ steps.parse_issue.outputs.upstream_issue_number }}
+      fullsend_stage: ${{ steps.parse_issue.outputs.fullsend_stage }}
+    steps:
+      - name: Fetch mirror issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+        run: |
+          gh issue view "${MIRROR_ISSUE_NUMBER}" --json body -R "${REPO}" > mirror_issue.json
+
+      - name: Parse mirror issue
+        id: parse_issue
+        shell: python3 -u {0}
+        run: |
+          import json, os, re, sys
+
+          with open("mirror_issue.json") as f:
+              issue = json.load(f)
+
+          body = issue["body"] or ""
+
+          upstream = re.findall(r'### Upstream issue number\n\n(\d+)', body)
+          stage = re.findall(r'### Starting stage\n\n(\w+)', body)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              if not upstream:
+                  out.write("error=could not parse upstream issue number\n")
+                  out.flush()
+                  sys.exit(1)
+              if not stage or stage[0] not in ("triage", "code"):
+                  out.write(f"error=invalid starting stage: {stage[0] if stage else '(not found)'}\n")
+                  out.flush()
+                  sys.exit(1)
+
+              out.write(f"upstream_issue_number={upstream[0]}\n")
+              out.write(f"fullsend_stage={stage[0]}\n")
+
+      - name: Check upstream issue is open
+        id: check_upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          UPSTREAM_ISSUE_NUMBER: ${{ steps.parse_issue.outputs.upstream_issue_number }}
+        run: |
+          state=$(gh issue view "${UPSTREAM_ISSUE_NUMBER}" --json state --jq '.state' -R "${UPSTREAM_REPO}")
+          if [ "${state}" != "OPEN" ]; then
+            echo "error=Upstream issue ${UPSTREAM_REPO}#${UPSTREAM_ISSUE_NUMBER} is ${state}" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+
+      - name: Check for a duplicate issue
+        id: check_duplicate
+        env:
+          MIRRORED_ISSUES: ${{ vars.MIRRORED_ISSUES }}
+          UPSTREAM_ISSUE_NUMBER: ${{ steps.parse_issue.outputs.upstream_issue_number }}
+        run: |
+          # MIRRORED_ISSUES is a GitHub variable: "upstreamA:mirrorA,upstreamB:mirrorB,..." (issue number pairs)
+          existing=$(echo "${MIRRORED_ISSUES}" | grep -oP "(?<=^|,)${UPSTREAM_ISSUE_NUMBER}:\K[^,]+" || true)
+          if [ -n "${existing}" ]; then
+            echo "error=Upstream issue ${UPSTREAM_ISSUE_NUMBER} is already mirrored in #${existing}" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+
+      - name: Handle validation failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+          PARSE_ERROR: ${{ steps.parse_issue.outputs.error }}
+          UPSTREAM_ERROR: ${{ steps.check_upstream.outputs.error }}
+          DUPLICATE_ERROR: ${{ steps.check_duplicate.outputs.error }}
+        run: |
+          error="${PARSE_ERROR}${UPSTREAM_ERROR}${DUPLICATE_ERROR}"
+          error="${error:-Check the [workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) for details.}"
+          gh issue comment "${MIRROR_ISSUE_NUMBER}" --body "Mirror issue workflow failed: ${error}" -R "${REPO}"
+          gh issue close "${MIRROR_ISSUE_NUMBER}" -R "${REPO}"
+
+  mirror:
+    needs: [check, validate]
+    if: needs.check.outputs.is_mirror == 'true' && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate repo token
+        id: repo-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GITHUB_APP_ID }}
+          private-key: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+
+      - name: Fetch upstream issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          UPSTREAM_ISSUE_NUMBER: ${{ needs.validate.outputs.upstream_issue_number }}
+        run: |
+          gh issue view "${UPSTREAM_ISSUE_NUMBER}" --json title,body -R "${UPSTREAM_REPO}" > upstream_issue.json
+
+      - name: Edit mirror issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          UPSTREAM_ISSUE_NUMBER: ${{ needs.validate.outputs.upstream_issue_number }}
+        run: |
+          new_title=$(jq -r '"[Fullsend#\(env.UPSTREAM_ISSUE_NUMBER)]: \(.title)"' upstream_issue.json)
+
+          # Using redirect.github.com avoids a reference to the mirror issue in the upstream issue
+          upstream_url="https://redirect.github.com/${UPSTREAM_REPO}/issues/${UPSTREAM_ISSUE_NUMBER}"
+
+          {
+            echo "> Mirrored from [${UPSTREAM_REPO}#${UPSTREAM_ISSUE_NUMBER}](${upstream_url})"
+            echo ""
+            echo "## Original description"
+            echo ""
+            jq -r '.body' upstream_issue.json
+          } > new_body.md
+
+          # Sanitize the issue body to avoid GitHub references to upstream
+          sed -i -e "s|https://github.com/${UPSTREAM_REPO}/|https://redirect.github.com/${UPSTREAM_REPO}/|g" new_body.md
+          # Reference to an issue in the upstream project like `#123` should link to upstream in the mirrored issue
+          sed -i -E "s~(^|[^[:alnum:]\[])#([0-9]+)\b~\1[${UPSTREAM_REPO}#\2](https://redirect.github.com/${UPSTREAM_REPO}/issues/\2)~g" new_body.md
+
+          gh issue edit "${MIRROR_ISSUE_NUMBER}" \
+            --title "${new_title}" \
+            --body-file new_body.md \
+            -R "${REPO}"
+
+      - name: Apply stage label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+          FULLSEND_STAGE: ${{ needs.validate.outputs.fullsend_stage }}
+        run: |
+          gh issue edit "${MIRROR_ISSUE_NUMBER}" --add-label "ready-to-${FULLSEND_STAGE}" -R "${REPO}"
+
+      - name: Update mirrored issues
+        env:
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          MIRRORED_ISSUES: ${{ vars.MIRRORED_ISSUES }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+          UPSTREAM_ISSUE_NUMBER: ${{ needs.validate.outputs.upstream_issue_number }}
+        run: |
+          # Append to MIRRORED_ISSUES variable: "upstreamA:mirrorA,upstreamB:mirrorB,..." (issue number pairs)
+          if [ -n "${MIRRORED_ISSUES}" ]; then
+            MIRRORED_ISSUES="${MIRRORED_ISSUES},"
+          fi
+          gh variable set MIRRORED_ISSUES --body "${MIRRORED_ISSUES}${UPSTREAM_ISSUE_NUMBER}:${MIRROR_ISSUE_NUMBER}" -R "${REPO}"
+
+      - name: Handle mirror failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIRROR_ISSUE_NUMBER: ${{ inputs.mirror_issue_number }}
+        run: |
+          gh issue comment "${MIRROR_ISSUE_NUMBER}" --body "Mirror issue workflow failed during mirroring. Check the [workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) for details." -R "${REPO}"
