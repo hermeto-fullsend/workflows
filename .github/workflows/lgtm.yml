@@ -1,0 +1,42 @@
+---
+name: LGTM — approve for upstream
+on:
+  workflow_call:
+    inputs:
+      upstream_repo:
+        required: true
+        type: string
+
+permissions:
+  pull-requests: write
+
+jobs:
+  approve-for-upstream:
+    if: >-
+      github.event.review.state == 'approved'
+      && github.event.review.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Label, comment, and close
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr edit "${PR_NUMBER}" --add-label "approved-for-upstream" -R "${REPO}"
+
+          gh pr comment "${PR_NUMBER}" -R "${REPO}" --body "$(cat <<COMMENT
+          ## Approved for upstream
+
+          This PR has been approved for filing upstream. Next steps:
+
+          1. Cherry-pick the commits into your personal fork of \`${UPSTREAM_REPO}\`
+          2. Open a PR against \`${UPSTREAM_REPO}\`
+          3. Adapt the PR description to upstream's contribution guidelines
+
+          Closing this PR now — it was never intended to be merged into the fork.
+          COMMENT
+          )"
+
+          gh pr close "${PR_NUMBER}" -R "${REPO}"
