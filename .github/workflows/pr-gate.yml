@@ -1,0 +1,26 @@
+---
+name: PR merge gate
+on:
+  workflow_call:
+
+permissions:
+  pull-requests: read
+
+jobs:
+  check-scope:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Block source code merges
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.number }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          FILES=$(gh pr diff "$PR_NUMBER" --name-only)
+          BLOCKED=$(printf '%s\n' "$FILES" | grep -vE '^\.github/' || true)
+          if [ -n "$BLOCKED" ]; then
+            echo "::error::This PR modifies source code and cannot be merged into the fork."
+            echo "Files outside allowed scope:"
+            printf '%s\n' "$BLOCKED"
+            exit 1
+          fi
