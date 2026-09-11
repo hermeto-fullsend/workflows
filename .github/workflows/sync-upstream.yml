@@ -57,8 +57,6 @@ jobs:
 
           default_branch="$(git branch --show-current)"
 
-          echo "old_main=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
           if git rebase "upstream/${default_branch}"; then
             echo "rebase=success" >> "$GITHUB_OUTPUT"
           else
@@ -72,32 +70,6 @@ jobs:
         run: |
           default_branch="$(git branch --show-current)"
           git push origin "$default_branch" --force-with-lease
-
-      - name: Rebase open PRs
-        if: steps.rebase_attempt.outputs.rebase == 'success'
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          OLD_MAIN: ${{ steps.rebase_attempt.outputs.old_main }}
-        run: |
-          default_branch="$(git branch --show-current)"
-
-          gh pr list --state open --base "$default_branch" \
-            --json number,headRefName,isCrossRepository \
-            --jq '.[] | select(.isCrossRepository == false) | "\(.number) \(.headRefName)"' \
-          | while read -r number branch; do
-              git fetch origin "$branch"
-              git switch -C "$branch" "origin/$branch"
-
-              if git rebase --onto "origin/$default_branch" "$OLD_MAIN"; then
-                git push origin "$branch" --force-with-lease
-              else
-                git rebase --abort
-                gh pr comment "$number" --body "The fork's base branch was rebased onto upstream; please rebase this PR branch manually."
-              fi
-            done
-
-          git switch "$default_branch"
 
       - name: Create a PR for conflict resolution
         if: steps.rebase_attempt.outputs.rebase != 'success'
